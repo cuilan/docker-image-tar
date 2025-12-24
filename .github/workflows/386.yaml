@@ -15,17 +15,23 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Setup working directory on /mnt
+    - name: Setup working directory
       run: |
-        # 在 /mnt 创建临时工作目录，利用更大的磁盘空间
-        WORK_DIR="/mnt/docker-image-work"
+        # 尝试使用 /mnt 目录（如果可写），否则使用 RUNNER_TEMP
+        if [ -w /mnt ] 2>/dev/null; then
+          WORK_DIR="/mnt/docker-image-work"
+          echo "使用 /mnt 目录（空间更大）"
+        else
+          WORK_DIR="${RUNNER_TEMP}/docker-image-work"
+          echo "使用 RUNNER_TEMP 目录（/mnt 不可写）"
+        fi
         mkdir -p "${WORK_DIR}"
         echo "WORK_DIR=${WORK_DIR}" >> $GITHUB_ENV
         echo "工作目录已设置到: ${WORK_DIR}"
         echo "=== 各分区磁盘空间 ==="
         df -h
-        echo "=== /mnt 目录空间 ==="
-        df -h /mnt
+        echo "=== 工作目录所在分区空间 ==="
+        df -h "${WORK_DIR}" || df -h "$(dirname ${WORK_DIR})"
 
     - name: Check disk space before cleanup
       run: |
