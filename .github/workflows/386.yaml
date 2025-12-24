@@ -38,7 +38,7 @@ jobs:
         images="${{ github.event.inputs.docker_images }}"
         IFS=',' read -r -a image_array <<< "$images"
         
-        # 逐个处理镜像，拉取后立即保存并删除，以节省磁盘空间
+        # 逐个处理镜像，使用管道直接压缩，避免中间文件占用双倍空间
         for image in "${image_array[@]}"; do
           image=$(echo "$image" | xargs)  # 去除前后空格
           if [ -z "$image" ]; then
@@ -54,11 +54,11 @@ jobs:
           docker pull "${image}" --platform "linux/386"
           
           # 生成文件名（替换 / 和 : 为 _）
-          tar_filename=$(echo "${image}" | tr '/' '_' | tr ':' '_').tar
+          tar_gz_filename=$(echo "${image}" | tr '/' '_' | tr ':' '_').tar.gz
           
-          # 保存镜像为 tar 文件
-          echo "正在保存镜像为: $tar_filename"
-          docker save "${image}" > "${tar_filename}"
+          # 使用管道直接将镜像保存并压缩，避免中间 tar 文件占用空间
+          echo "正在保存并压缩镜像为: $tar_gz_filename"
+          docker save "${image}" | gzip > "${tar_gz_filename}"
           
           # 立即删除镜像以释放空间
           echo "正在删除镜像以释放空间: $image"
@@ -67,27 +67,27 @@ jobs:
           # 清理悬空镜像
           docker image prune -f
           
-          echo "镜像 $image 处理完成"
+          echo "镜像 $image 处理完成，文件: $tar_gz_filename"
           echo "当前磁盘空间:"
           df -h
         done
 
-    - name: Check disk space before compression
+    - name: Check disk space before final packaging
       run: |
-        echo "=== 压缩前的磁盘空间 ==="
+        echo "=== 最终打包前的磁盘空间 ==="
         df -h
-        echo "=== TAR 文件列表 ==="
-        ls -lh *.tar || true
+        echo "=== 压缩文件列表 ==="
+        ls -lh *.tar.gz || true
 
-    - name: Compress the TAR files
+    - name: Package all compressed files
       run: |
-        # 压缩所有 tar 文件
-        tar -czf 386-image.tar.gz *.tar
-        # 压缩后立即删除原始 tar 文件以释放空间
-        rm -f *.tar
-        echo "=== 压缩后的磁盘空间 ==="
+        # 将所有压缩文件打包成一个文件
+        tar -czf 386-image.tar.gz *.tar.gz
+        # 打包后删除单个压缩文件以释放空间
+        rm -f *.tar.gz
+        echo "=== 打包后的磁盘空间 ==="
         df -h
-        echo "=== 压缩文件大小 ==="
+        echo "=== 最终文件大小 ==="
         ls -lh 386-image.tar.gz
 
     - name: Upload artifact
