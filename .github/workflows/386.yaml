@@ -15,6 +15,18 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
+    - name: Setup working directory on /mnt
+      run: |
+        # 在 /mnt 创建临时工作目录，利用更大的磁盘空间
+        WORK_DIR="/mnt/docker-image-work"
+        mkdir -p "${WORK_DIR}"
+        echo "WORK_DIR=${WORK_DIR}" >> $GITHUB_ENV
+        echo "工作目录已设置到: ${WORK_DIR}"
+        echo "=== 各分区磁盘空间 ==="
+        df -h
+        echo "=== /mnt 目录空间 ==="
+        df -h /mnt
+
     - name: Check disk space before cleanup
       run: |
         echo "=== 清理前的磁盘空间 ==="
@@ -34,11 +46,12 @@ jobs:
         df -h
 
     - name: Pull Docker Images and Package
+      working-directory: ${{ env.WORK_DIR }}
       run: |
         images="${{ github.event.inputs.docker_images }}"
         IFS=',' read -r -a image_array <<< "$images"
         
-        # 逐个处理镜像，使用管道直接压缩，避免中间文件占用双倍空间
+        # 逐个处理镜像，保存为 tar 文件（使用 /mnt 分区，空间充足）
         for image in "${image_array[@]}"; do
           image=$(echo "$image" | xargs)  # 去除前后空格
           if [ -z "$image" ]; then
@@ -46,19 +59,22 @@ jobs:
           fi
           
           echo "=== 处理镜像: $image ==="
+          echo "当前工作目录: $(pwd)"
           echo "当前磁盘空间:"
           df -h
+          echo "工作目录所在分区空间:"
+          df -h $(pwd)
           
           # 拉取镜像
           echo "正在拉取镜像: $image"
           docker pull "${image}" --platform "linux/386"
           
           # 生成文件名（替换 / 和 : 为 _）
-          tar_gz_filename=$(echo "${image}" | tr '/' '_' | tr ':' '_').tar.gz
+          tar_filename=$(echo "${image}" | tr '/' '_' | tr ':' '_').tar
           
-          # 使用管道直接将镜像保存并压缩，避免中间 tar 文件占用空间
-          echo "正在保存并压缩镜像为: $tar_gz_filename"
-          docker save "${image}" | gzip > "${tar_gz_filename}"
+          # 保存镜像为 tar 文件（在 /mnt 分区，空间充足）
+          echo "正在保存镜像为: $tar_filename"
+          docker save "${image}" > "${tar_filename}"
           
           # 立即删除镜像以释放空间
           echo "正在删除镜像以释放空间: $image"
@@ -67,28 +83,41 @@ jobs:
           # 清理悬空镜像
           docker image prune -f
           
-          echo "镜像 $image 处理完成，文件: $tar_gz_filename"
+          echo "镜像 $image 处理完成，文件: $tar_filename"
           echo "当前磁盘空间:"
           df -h
         done
 
     - name: Check disk space before final packaging
+      working-directory: ${{ env.WORK_DIR }}
       run: |
         echo "=== 最终打包前的磁盘空间 ==="
         df -h
-        echo "=== 压缩文件列表 ==="
-        ls -lh *.tar.gz || true
+        echo "工作目录所在分区空间:"
+        df -h $(pwd)
+        echo "=== TAR 文件列表 ==="
+        ls -lh *.tar || true
 
-    - name: Package all compressed files
+    - name: Compress the TAR files
+      working-directory: ${{ env.WORK_DIR }}
       run: |
-        # 将所有压缩文件打包成一个文件
-        tar -czf 386-image.tar.gz *.tar.gz
-        # 打包后删除单个压缩文件以释放空间
-        rm -f *.tar.gz
-        echo "=== 打包后的磁盘空间 ==="
+        # 将所有 tar 文件压缩成一个文件
+        tar -czf 386-image.tar.gz *.tar
+        # 压缩后删除原始 tar 文件以释放空间
+        rm -f *.tar
+        echo "=== 压缩后的磁盘空间 ==="
         df -h
+        echo "工作目录所在分区空间:"
+        df -h $(pwd)
         echo "=== 最终文件大小 ==="
         ls -lh 386-image.tar.gz
+
+    - name: Move final file to workspace
+      run: |
+        # 将最终文件移动到工作区根目录，以便上传
+        cp "${{ env.WORK_DIR }}/386-image.tar.gz" ./386-image.tar.gz
+        echo "文件已复制到工作区: $(pwd)/386-image.tar.gz"
+        ls -lh ./386-image.tar.gz
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
@@ -102,5 +131,9 @@ jobs:
       run: |
         echo "=== 最终清理 ==="
         docker system prune -a -f --volumes || true
+        # 清理工作区文件
         rm -f *.tar *.tar.gz || true
+        # 清理 /mnt 上的临时工作目录
+        rm -rf "${{ env.WORK_DIR }}" || true
+        echo "=== 清理后的磁盘空间 ==="
         df -h
