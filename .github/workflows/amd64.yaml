@@ -15,23 +15,80 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
+    - name: Check disk space before cleanup
+      run: |
+        echo "=== 清理前的磁盘空间 ==="
+        df -h
+        echo "=== Docker 占用空间 ==="
+        docker system df || true
+
     - name: Clean up Docker to free space
       run: |
-          docker system prune -a -f
-          docker volume prune -f
+        # 清理所有未使用的容器、网络、镜像和构建缓存
+        docker system prune -a -f --volumes
+        # 清理所有悬空镜像
+        docker image prune -a -f
+        # 清理构建缓存
+        docker builder prune -a -f
+        echo "=== 清理后的磁盘空间 ==="
+        df -h
 
     - name: Pull Docker Images and Package
       run: |
         images="${{ github.event.inputs.docker_images }}"
         IFS=',' read -r -a image_array <<< "$images"
+        
+        # 逐个处理镜像，拉取后立即保存并删除，以节省磁盘空间
         for image in "${image_array[@]}"; do
+          image=$(echo "$image" | xargs)  # 去除前后空格
+          if [ -z "$image" ]; then
+            continue
+          fi
+          
+          echo "=== 处理镜像: $image ==="
+          echo "当前磁盘空间:"
+          df -h
+          
+          # 拉取镜像
+          echo "正在拉取镜像: $image"
           docker pull "${image}" --platform "linux/amd64"
-          # docker save "${image}" -o "${image//\//_}-amd64.tar"
-          docker save "${image}" > `echo ${image} | tr '/' '_' | tr ':' '_'`.tar
+          
+          # 生成文件名（替换 / 和 : 为 _）
+          tar_filename=$(echo "${image}" | tr '/' '_' | tr ':' '_').tar
+          
+          # 保存镜像为 tar 文件
+          echo "正在保存镜像为: $tar_filename"
+          docker save "${image}" > "${tar_filename}"
+          
+          # 立即删除镜像以释放空间
+          echo "正在删除镜像以释放空间: $image"
+          docker rmi "${image}" || true
+          
+          # 清理悬空镜像
+          docker image prune -f
+          
+          echo "镜像 $image 处理完成"
+          echo "当前磁盘空间:"
+          df -h
         done
 
+    - name: Check disk space before compression
+      run: |
+        echo "=== 压缩前的磁盘空间 ==="
+        df -h
+        echo "=== TAR 文件列表 ==="
+        ls -lh *.tar || true
+
     - name: Compress the TAR files
-      run: tar -czf amd64-image.tar.gz *.tar
+      run: |
+        # 压缩所有 tar 文件
+        tar -czf amd64-image.tar.gz *.tar
+        # 压缩后立即删除原始 tar 文件以释放空间
+        rm -f *.tar
+        echo "=== 压缩后的磁盘空间 ==="
+        df -h
+        echo "=== 压缩文件大小 ==="
+        ls -lh amd64-image.tar.gz
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
@@ -40,6 +97,10 @@ jobs:
         path: amd64-image.tar.gz
         retention-days: 1  # 将保留天数设置为 1 天 最多可设置90天
 
-    - name: Clean up intermediate files
+    - name: Final cleanup
+      if: always()
       run: |
-        rm *.tar
+        echo "=== 最终清理 ==="
+        docker system prune -a -f --volumes || true
+        rm -f *.tar *.tar.gz || true
+        df -h
